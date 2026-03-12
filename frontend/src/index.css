@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --pk-green:   #00C566;
+  --pk-green2:  #34D399;
+  --bg-main:    #080C14;
+  --bg-sidebar: #0D1117;
+  --bg-card:    #111827;
+  --bg-card2:   #1A2235;
+  --glass:      #1C2A40;
+  --glass2:     #243044;
+  --text-white: #F0F6FC;
+  --text-mid:   #8D9DB8;
+  --text-dim:   #3D5068;
+  --yellow:     #F59E0B;
+  --red:        #F43F5E;
+  --blue:       #60A5FA;
+  --purple:     #A78BFA;
+  --cyan:       #22D3EE;
+}
+
+.light {
+  --bg-main:    #F2F2F7;
+  --bg-sidebar: #FFFFFF;
+  --bg-card:    #FFFFFF;
+  --bg-card2:   #F2F2F7;
+  --glass:      #FFFFFF;
+  --glass2:     #E5E5EA;
+  --text-white: #1C1C1E;
+  --text-mid:   #636366;
+  --text-dim:   #AEAEB2;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: var(--bg-main);
+  color: var(--text-white);
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--glass2); border-radius: 3px; }
+
+.btn-ios {
+  background: var(--glass);
+  border: 1px solid var(--glass2);
+  color: var(--text-mid);
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.btn-ios:hover { background: var(--glass2); }
+
+.btn-green {
+  background: #00C566;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  padding: 7px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.btn-green:hover { background: #34D399; }
+
+/* ── Layout ── */
+.sidebar-wrap { display: flex; flex-shrink: 0; }
+.bottom-nav   { display: none; }
+
+/* Fixed bottom nav base styles */
+@media (max-width: 768px) {
+  .bottom-nav {
+    position: fixed !important;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 999;
+    height: 56px;
+  }
+  /* Add padding so content doesn't hide behind bottom nav */
+  .page-content {
+    padding-bottom: 56px !important;
+  }
+}
+.desktop-table { display: block; }
+.mobile-cards  { display: none; }
+.topbar-logo   { display: none; }
+
+/* ── Animations ── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fadeIn 0.2s ease forwards; }
+
+
+/* ── Reminders ── */
+.rem-desktop { display: flex; flex: 1; }
+.rem-mobile  { display: none; }
+
+/* ── Calculator ── */
+.calc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 768px) {
+  .rem-desktop { display: none; }
+  .rem-mobile  { display: block; }
+
+  /* Tabs — scrollable on mobile */
+  .tabs-row {
+    overflow-x: auto !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .tabs-row::-webkit-scrollbar { display: none; }
+  .tabs-row button {
+    flex-shrink: 0 !important;
+    flex: none !important;
+    padding: 7px 14px !important;
+    font-size: 12px !important;
+  }
+}
+
+/* ── Mobile ── */
+@media (max-width: 768px) {
+  .sidebar-wrap  { display: none; }
+  .calc-grid     { grid-template-columns: 1fr !important; }
+  .topbar-logo   { display: flex; }  /* show on mobile */
+  .bottom-nav {
+    display: flex;
+    background: var(--glass);
+    border-top: 1px solid var(--glass2);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .desktop-table { display: none; }
+  .mobile-cards  { display: block; }
+
+  /* Topbar compact */
+  .topbar-title  { display: none; }
+
+  /* Modals full screen on mobile */
+  .modal-box {
+    width: 100% !important;
+    height: 100% !important;
+    border-radius: 0 !important;
+    max-height: 100vh !important;
+  }
+}
