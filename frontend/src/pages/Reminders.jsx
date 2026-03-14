@@ -45,7 +45,8 @@ export default function Reminders() {
         setSent(s => ({ ...s, [`${selected.order_id}-${stageKey}`]: true }))
         setSelected(o => ({ ...o, reminders_sent: [...(o.reminders_sent||[]), stageKey] }))
       } else {
-        toast.error('Send nahi hua')
+        const errMsg = res.data.error || 'Send nahi hua'
+        toast.error(`❌ ${errMsg}`, { duration: 6000 })
       }
     } catch { toast.error('Error') }
     finally { setSending(s => ({ ...s, [stageKey]: false })) }

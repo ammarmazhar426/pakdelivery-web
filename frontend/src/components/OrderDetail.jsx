@@ -62,22 +62,35 @@ export default function OrderDetail({ order, onClose }) {
           border:'1px solid var(--glass2)', marginBottom:16,
           display:'grid', gridTemplateColumns:'1fr 1fr', gap:10,
         }}>
-          {[
-            ['Customer', order.name],
-            ['Phone',    order.phone],
-            ['City',     order.city],
-            ['Product',  order.product],
-            ['Amount',   `Rs.${Number(order.amount||0).toLocaleString()}`],
-            ['Courier',  order.courier||'—'],
-            ['Status',   order.status],
-            ['Date',     (order.created_at||'').slice(0,10)],
-            ['Time',     (order.created_at||'').slice(11,16) || '—'],
-          ].map(([label, value]) => (
-            <div key={label}>
-              <span style={{ fontSize:10, color:'var(--text-dim)', fontWeight:600 }}>{label}</span>
-              <p style={{ fontSize:13, color:'var(--text-white)', fontWeight:500, marginTop:2 }}>{value}</p>
-            </div>
-          ))}
+          {(() => {
+            // 12hr time format
+            const rawTime = (order.created_at||'').slice(11,16)
+            let timeFormatted = '—'
+            if (rawTime) {
+              const [h, m] = rawTime.split(':').map(Number)
+              const ampm = h >= 12 ? 'PM' : 'AM'
+              const h12  = h % 12 || 12
+              timeFormatted = `${h12}:${String(m).padStart(2,'0')} ${ampm}`
+            }
+            const fields = [
+              ['Customer', order.name],
+              ['Phone',    order.phone],
+              ['City',     order.city],
+              ['Address',  order.address || '—'],
+              ['Product',  order.product],
+              ['Amount',   `Rs.${Number(order.amount||0).toLocaleString()}`],
+              ['Courier',  order.courier||'—'],
+              ['Status',   order.status],
+              ['Date',     (order.created_at||'').slice(0,10)],
+              ['Time',     timeFormatted],
+            ]
+            return fields.map(([label, value]) => (
+              <div key={label} style={{ gridColumn: label==='Address' ? 'span 2' : 'span 1' }}>
+                <span style={{ fontSize:10, color:'var(--text-dim)', fontWeight:600 }}>{label}</span>
+                <p style={{ fontSize:13, color:'var(--text-white)', fontWeight:500, marginTop:2 }}>{value}</p>
+              </div>
+            ))
+          })()}
         </div>
 
         {/* Risk */}

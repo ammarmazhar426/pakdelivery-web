@@ -5,7 +5,8 @@ import Topbar    from './components/Topbar'
 import Dashboard  from './pages/Dashboard'
 import Reminders  from './pages/Reminders'
 import Calculator from './pages/Calculator'
-import RiskIntel  from './pages/RiskIntel'
+import RiskIntel    from './pages/RiskIntel'
+import ShopifySync  from './pages/ShopifySync'
 
 export default function App() {
   const [tab,   setTab]   = useState('dashboard')
@@ -37,6 +38,7 @@ export default function App() {
           {tab === 'reminders'  && <Reminders />}
           {tab === 'calculator' && <Calculator />}
           {tab === 'risk'       && <RiskIntel />}
+          {tab === 'shopify'    && <ShopifySync />}
         </div>
         {/* Bottom nav — mobile only, always fixed at bottom */}
         <div className="bottom-nav">
@@ -45,6 +47,7 @@ export default function App() {
             { key:'reminders',  icon:'📲', label:'Reminders' },
             { key:'calculator', icon:'💰', label:'P&L' },
             { key:'risk',       icon:'🛡️', label:'Risk' },
+            { key:'shopify',    icon:'🛒', label:'Shopify' },
           ].map(({ key, icon, label }) => (
             <button key={key} onClick={() => setTab(key)} style={{
               flex:1, display:'flex', flexDirection:'column', alignItems:'center',

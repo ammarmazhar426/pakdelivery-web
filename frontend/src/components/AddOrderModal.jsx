@@ -138,12 +138,37 @@ export default function AddOrderModal({ onClose }) {
               {/* Issues */}
               {risk.issues?.length > 0 && (
                 <div style={{ marginTop:6, display:'flex', flexDirection:'column', gap:2 }}>
-                  {risk.issues.slice(0,3).map((issue,i) => (
+                  {risk.issues.slice(0,4).map((issue,i) => (
                     <p key={i} style={{ fontSize:11, color:'var(--text-mid)' }}>{issue}</p>
                   ))}
-                  {risk.issues.length > 3 && (
-                    <p style={{ fontSize:10, color:'var(--text-dim)' }}>+{risk.issues.length-3} more issues...</p>
+                  {risk.issues.length > 4 && (
+                    <p style={{ fontSize:10, color:'var(--text-dim)' }}>+{risk.issues.length-4} more issues...</p>
                   )}
+                </div>
+              )}
+              {/* Address tip */}
+              {risk.details?.address_tip && (
+                <div style={{ marginTop:6, padding:'6px 10px', background:'rgba(245,158,11,0.1)', borderRadius:8, borderLeft:'3px solid #F59E0B' }}>
+                  <p style={{ fontSize:11, color:'#F59E0B', fontWeight:600 }}>💡 Address Tip:</p>
+                  <p style={{ fontSize:11, color:'var(--text-mid)', marginTop:2 }}>{risk.details.address_tip}</p>
+                </div>
+              )}
+              {/* Courier suggestions */}
+              {risk.details?.courier_suggestion?.length > 0 && (
+                <div style={{ marginTop:6 }}>
+                  <p style={{ fontSize:10, color:'var(--text-dim)', fontWeight:700, marginBottom:4 }}>📦 COURIER SUGGESTION:</p>
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:4 }}>
+                    {risk.details.courier_suggestion.slice(0,3).map((c,i) => (
+                      <span key={i} style={{
+                        fontSize:10, fontWeight:700, padding:'3px 8px', borderRadius:20,
+                        background: c.coverage.includes('Full') ? 'rgba(0,197,102,0.15)' : 'rgba(245,158,11,0.15)',
+                        color: c.coverage.includes('Full') ? '#00C566' : '#F59E0B',
+                        border: `1px solid ${c.coverage.includes('Full') ? '#00C56633' : '#F59E0B33'}`,
+                      }} title={c.note}>
+                        {c.courier} {c.coverage.includes('Full') ? '✅' : '⚠️'}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>

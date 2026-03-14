@@ -1,10 +1,11 @@
-import { LayoutDashboard, Bell, Calculator, Shield } from 'lucide-react'
+import { LayoutDashboard, Bell, Calculator, Shield, ShoppingBag } from 'lucide-react'
 
 const NAV = [
   { key: 'dashboard',  icon: LayoutDashboard, label: 'Dashboard' },
   { key: 'reminders',  icon: Bell,            label: 'Reminders' },
   { key: 'calculator', icon: Calculator,      label: 'P&L Calculator' },
   { key: 'risk',       icon: Shield,         label: 'AI Risk Intel' },
+  { key: 'shopify',    icon: ShoppingBag,    label: 'Shopify Sync' },
 ]
 
 export default function Sidebar({ activeTab, onTabChange }) {

@@ -4,6 +4,9 @@ Run: uvicorn main:app --reload --port 8000
 """
 
 from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
+import os
+load_dotenv()  # Load .env file
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -39,21 +42,28 @@ def save_orders(orders):
     )
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────────
-WA_INSTANCE = "instance164756"
-WA_TOKEN    = "cwnxyw0d7e8w0d83"
+WA_INSTANCE = os.getenv("WA_INSTANCE")  # Set in .env
+WA_TOKEN    = os.getenv("WA_TOKEN")     # Set in .env
 
-def send_whatsapp(phone: str, message: str) -> bool:
+def send_whatsapp(phone: str, message: str) -> dict:
+    """Returns dict with sent:bool and error:str"""
+    if not WA_INSTANCE or not WA_TOKEN:
+        return {"sent": False, "error": "WA_INSTANCE ya WA_TOKEN .env mein set nahi — backend restart karo"}
     try:
         p = re.sub(r"\D", "", phone)
+        if not p:
+            return {"sent": False, "error": "Phone number empty hai"}
         if p.startswith("0"): p = "92" + p[1:]
         r = req_lib.post(
             f"https://api.ultramsg.com/{WA_INSTANCE}/messages/chat",
             data={"token": WA_TOKEN, "to": p, "body": message},
             timeout=15
         )
-        return r.json().get("sent") == "true"
-    except:
-        return False
+        res = r.json()
+        sent = res.get("sent") == "true"
+        return {"sent": sent, "error": None if sent else str(res)}
+    except Exception as e:
+        return {"sent": False, "error": str(e)}
 
 # ── Blacklist ─────────────────────────────────────────────────────────────────
 BLACKLIST_FILE = Path("blacklist.json")
@@ -186,24 +196,144 @@ def analyze_order(order: dict) -> dict:
             score += 8; issues.append(f"🗺️ Medium RTO area ({city})"); city_risk = "medium"
     details["city_risk"] = city_risk
 
-    # ── 6. ADDRESS QUALITY ────────────────────────────────────────────────────
-    addr_score = 0
-    if len(address) < 5:
-        score += 20; issues.append("❌ Address bilkul nahi hai"); addr_score = 0
-    elif len(address) < 15:
-        score += 12; issues.append("⚠️ Address bohat chota hai — ghar number, gali number lo"); addr_score = 30
+    # ── 6. ADDRESS INTELLIGENCE ───────────────────────────────────────────────
+    # Pakistani cities & countries — if address ONLY has these, it's invalid
+    PK_CITIES    = ["karachi","lahore","islamabad","rawalpindi","faisalabad","multan",
+                    "peshawar","quetta","hyderabad","gujranwala","sialkot","abbottabad",
+                    "bahawalpur","sargodha","sukkur","larkana","sheikhupura","rahim yar khan",
+                    "jhang","gujrat","mardan","kasur","dera ghazi khan","nawabshah",
+                    "mirpur khas","mingora","okara","chiniot","kamoke","hafizabad"]
+    PK_COUNTRIES = ["pakistan","pak","pkistan","pkstan"]
+
+    addr_score   = 0
+    addr_problem = None
+    addr_tip     = None
+
+    if not address or len(address.strip()) < 3:
+        score += 25; addr_score = 0
+        addr_problem = "❌ Address bilkul nahi diya"
+        addr_tip     = "Ghar number, gali/street, mohalla, city — sab lo"
+
     else:
-        # Check for quality indicators
-        has_number   = bool(re.search(r'\d', address))
-        has_street   = any(w in address for w in ["street","gali","road","block","sector","phase","house","flat","floor","plot","makan","makaan","mohalla","colony"])
-        word_count   = len(address.split())
-        if has_number and has_street and word_count >= 5:
-            addr_score = 100
-        elif has_number or has_street:
-            addr_score = 60; score += 5; issues.append("💡 Address thora aur detail hona chahiye")
+        addr_lower   = address.lower().strip()
+        addr_words   = set(addr_lower.replace(","," ").split())
+        has_number   = bool(re.search(r'\b\d+\b', addr_lower))
+        has_street   = any(w in addr_lower for w in [
+            "street","st ","gali","road","rd ","block","sector","phase","house","flat",
+            "floor","plot","makan","makaan","mohalla","colony","town","avenue","ave",
+            "lane","chowk","bazar","bazaar","market","near","opposite","behind","beside",
+            "next to","b/w","between","shop","apartment","apt","villa","bungalow",
+        ])
+        word_count   = len(addr_lower.split())
+
+        # ── DETECT: Only city/country in address ──────────────────────────────
+        meaningful_words = addr_words - set(PK_CITIES) - set(PK_COUNTRIES) - {"pakistan",",","."}
+        only_city_country = len(meaningful_words) == 0 or (
+            word_count <= 3 and
+            any(city in addr_lower for city in PK_CITIES) and
+            not has_number and not has_street
+        )
+
+        if only_city_country:
+            score += 30; addr_score = 5
+            addr_problem = "🚨 Address mein sirf city/country ka naam hai — yeh valid address nahi!"
+            addr_tip     = "Courier delivery ke liye chahiye: Ghar/flat number + Gali/Street + Mohalla/Block + City"
+
+        elif not has_number and not has_street:
+            score += 18; addr_score = 20
+            addr_problem = "⚠️ Address mein ghar number aur gali/block nahi"
+            addr_tip     = "Example: House 5, Street 3, Block B, Gulshan — is tarah daalo"
+
+        elif not has_number:
+            score += 8; addr_score = 50
+            addr_problem = "💡 Ghar/plot number missing hai"
+            addr_tip     = "Ghar ya plot number add karo taake courier dhundh sake"
+
+        elif not has_street:
+            score += 5; addr_score = 60
+            addr_problem = "💡 Gali/Street/Block missing hai"
+            addr_tip     = "Street, gali ya block ka naam bhi daalo"
+
+        elif has_number and has_street and word_count >= 6:
+            addr_score = 100  # Complete address
+
+        elif has_number and has_street:
+            addr_score = 80
+            addr_tip   = "Address acha hai — aur detail ho sakti hai (mohalla/landmark)"
+
         else:
-            addr_score = 30; score += 10; issues.append("⚠️ Address mein ghar/gali number nahi")
+            addr_score = 60
+
+        if addr_problem:
+            issues.append(addr_problem)
+
     details["address_score"] = addr_score
+    details["address_tip"]   = addr_tip
+    details["address_problem"] = addr_problem
+
+    # ── COURIER SUGGESTION based on city ──────────────────────────────────────
+    COURIER_COVERAGE = {
+        "leopards": {
+            "major":   ["karachi","lahore","islamabad","rawalpindi","faisalabad","multan",
+                        "peshawar","quetta","hyderabad","gujranwala","sialkot"],
+            "partial": ["abbottabad","bahawalpur","sargodha","sukkur","dera ghazi khan",
+                        "mardan","mingora","swat","mirpur","muzaffarabad"],
+            "note":    "Major cities mein best — remote areas limited"
+        },
+        "tcs": {
+            "major":   ["karachi","lahore","islamabad","rawalpindi","faisalabad","multan",
+                        "peshawar","quetta","hyderabad","gujranwala","sialkot","abbottabad"],
+            "partial": ["bahawalpur","sargodha","rahim yar khan","sukkur","larkana",
+                        "mingora","mardan","swabi","nowshera"],
+            "note":    "Wide network — villages tak bhi jata hai"
+        },
+        "blueex": {
+            "major":   ["karachi","lahore","islamabad","rawalpindi","faisalabad","multan",
+                        "peshawar","hyderabad","gujranwala"],
+            "partial": ["sialkot","bahawalpur","sargodha","sukkur"],
+            "note":    "Urban areas best — COD fast settlement"
+        },
+        "rider": {
+            "major":   ["karachi","lahore","islamabad","rawalpindi"],
+            "partial": ["faisalabad","multan","peshawar","hyderabad"],
+            "note":    "Fast delivery — sirf bade shehar"
+        },
+        "m&p": {
+            "major":   ["karachi","lahore","islamabad","rawalpindi","faisalabad","multan",
+                        "peshawar","quetta","hyderabad","gujranwala","sialkot","abbottabad",
+                        "bahawalpur","sargodha","rahim yar khan","sukkur","larkana",
+                        "sheikhupura","dera ghazi khan","mardan","mingora","swat"],
+            "partial": ["remote villages","azad kashmir","gilgit","chitral","dir"],
+            "note":    "Sab se zyada coverage — villages tak bhi jata hai"
+        },
+        "call courier": {
+            "major":   ["karachi"],
+            "partial": ["hyderabad","sukkur"],
+            "note":    "Sirf Sindh — karachi best"
+        },
+    }
+
+    city_lower = city.lower().strip()
+    courier_suggestion = []
+    for courier, data in COURIER_COVERAGE.items():
+        if any(c in city_lower for c in data["major"]):
+            courier_suggestion.append({"courier": courier.upper(), "coverage": "✅ Full coverage", "note": data["note"]})
+        elif any(c in city_lower for c in data["partial"]):
+            courier_suggestion.append({"courier": courier.upper(), "coverage": "⚠️ Partial coverage", "note": data["note"]})
+
+    # Sort: full coverage first
+    courier_suggestion.sort(key=lambda x: 0 if "Full" in x["coverage"] else 1)
+
+    # If no courier found — remote area
+    if not courier_suggestion and city:
+        courier_suggestion = [
+            {"courier": "M&P",     "coverage": "🔍 Check karein", "note": "Sab se wide network"},
+            {"courier": "TCS",     "coverage": "🔍 Check karein", "note": "Villages tak bhi jata hai"},
+            {"courier": "LEOPARDS","coverage": "🔍 Check karein", "note": "Confirm karein is area mein jata hai ya nahi"},
+        ]
+        issues.append(f"⚠️ '{city}' mein limited courier coverage ho sakta hai — pehle check karein")
+
+    details["courier_suggestions"] = courier_suggestion[:4]  # top 4
 
     # ── 7. PRODUCT RISK ───────────────────────────────────────────────────────
     if any(f in product for f in FAKE_PRODUCTS):
@@ -394,10 +524,15 @@ def update_order(order_id: str, data: OrderUpdate):
                 if stage_key and stage_key not in o.get("reminders_sent",[]) and risk["rec"] != "REJECT":
                     msg = build_message(stage_key, o)
                     def _send(order=o, sk=stage_key, m=msg):
-                        ok = send_whatsapp(order["phone"], m)
-                        if ok:
-                            order.setdefault("reminders_sent",[]).append(sk)
-                            save_orders(load_orders())
+                        result = send_whatsapp(order["phone"], m)
+                        if result["sent"]:
+                            all_orders = load_orders()
+                            for ord_ in all_orders:
+                                if ord_["order_id"] == order["order_id"]:
+                                    ord_.setdefault("reminders_sent",[])
+                                    if sk not in ord_["reminders_sent"]:
+                                        ord_["reminders_sent"].append(sk)
+                            save_orders(all_orders)
                     threading.Thread(target=_send, daemon=True).start()
 
             o["_risk"] = analyze_order(o)
@@ -405,19 +540,54 @@ def update_order(order_id: str, data: OrderUpdate):
     raise HTTPException(404, "Order not found")
 
 @app.delete("/orders/{order_id}")
-def delete_order(order_id: str):
+def delete_order(order_id: str, delete_from_shopify: bool = False):
     orders = load_orders()
-    new = [o for o in orders if o["order_id"].upper() != order_id.upper()]
-    if len(new) == len(orders):
+    # Find order first
+    target = next((o for o in orders if o["order_id"].upper() == order_id.upper()), None)
+    if not target:
         raise HTTPException(404, "Order not found")
-    save_orders(new)
-    return {"deleted": order_id}
+
+    shopify_deleted = False
+
+    # If it's a Shopify order, also remove from synced_ids so it doesn't re-import
+    if target.get("shopify_id"):
+        cfg = load_shopify_config()
+        synced = set(cfg.get("synced_ids", []))
+        synced.discard(target["shopify_id"])
+        cfg["synced_ids"] = list(synced)
+        save_shopify_config(cfg)
+
+        # Also delete from Shopify if requested
+        if delete_from_shopify and cfg.get("enabled") and cfg.get("token"):
+            try:
+                resp = req_lib.delete(
+                    f"https://{cfg['shop']}/admin/api/2024-01/orders/{target['shopify_id']}.json",
+                    headers={"X-Shopify-Access-Token": cfg["token"]},
+                    timeout=10
+                )
+                shopify_deleted = resp.status_code in [200, 204]
+            except:
+                pass
+
+    new_orders = [o for o in orders if o["order_id"].upper() != order_id.upper()]
+    save_orders(new_orders)
+    return {"deleted": order_id, "shopify_deleted": shopify_deleted, "was_shopify_order": bool(target.get("shopify_id"))}
 
 # ── Risk Check ────────────────────────────────────────────────────────────────
 @app.post("/orders/check-risk")
 def check_risk(data: OrderCreate):
     order = data.dict()
     return analyze_order(order)
+
+# ── WhatsApp Debug / Test ────────────────────────────────────────────────────
+@app.get("/whatsapp/test")
+def test_whatsapp():
+    """Test WhatsApp credentials — call this to debug"""
+    return {
+        "WA_INSTANCE":  WA_INSTANCE or "❌ NOT SET — .env mein WA_INSTANCE nahi",
+        "WA_TOKEN":     (WA_TOKEN[:6]+"...") if WA_TOKEN else "❌ NOT SET — .env mein WA_TOKEN nahi",
+        "status":       "✅ Credentials loaded" if (WA_INSTANCE and WA_TOKEN) else "❌ Credentials missing",
+    }
 
 # ── WhatsApp Manual Send ──────────────────────────────────────────────────────
 @app.post("/whatsapp/send")
@@ -426,13 +596,13 @@ def manual_send(data: WhatsAppSend):
     for o in orders:
         if o["order_id"].upper() == data.order_id.upper():
             msg = build_message(data.stage_key, o)
-            ok  = send_whatsapp(o["phone"], msg)
-            if ok:
+            result = send_whatsapp(o["phone"], msg)
+            if result["sent"]:
                 o.setdefault("reminders_sent", [])
                 if data.stage_key not in o["reminders_sent"]:
                     o["reminders_sent"].append(data.stage_key)
                 save_orders(orders)
-            return {"sent": ok, "stage": data.stage_key}
+            return {"sent": result["sent"], "stage": data.stage_key, "error": result.get("error")}
     raise HTTPException(404, "Order not found")
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
@@ -768,3 +938,233 @@ def delete_pnl(record_id: str):
         raise HTTPException(404, "Record not found")
     save_pnl(new)
     return {"deleted": record_id}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHOPIFY INTEGRATION
+# ══════════════════════════════════════════════════════════════════════════════
+SHOPIFY_CONFIG_FILE = Path("shopify_config.json")
+
+def load_shopify_config():
+    try:
+        if SHOPIFY_CONFIG_FILE.exists():
+            return json.loads(SHOPIFY_CONFIG_FILE.read_text(encoding="utf-8"))
+    except: pass
+    return {"enabled": False, "shop": "", "token": "", "last_synced": "", "synced_ids": []}
+
+def save_shopify_config(cfg):
+    SHOPIFY_CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def shopify_to_order(s_order: dict, existing_id: str) -> dict:
+    """Convert Shopify order format to PakDelivery format"""
+    addr = s_order.get("shipping_address") or s_order.get("billing_address") or {}
+    customer = s_order.get("customer") or {}
+
+    name = (
+        f"{addr.get('first_name','')} {addr.get('last_name','')}".strip() or
+        f"{customer.get('first_name','')} {customer.get('last_name','')}".strip() or
+        s_order.get("email","Unknown")
+    )
+
+    phone = (
+        addr.get("phone") or
+        customer.get("phone") or
+        s_order.get("phone") or ""
+    )
+
+    address_parts = [
+        addr.get("address1",""),
+        addr.get("address2",""),
+        addr.get("zip",""),
+    ]
+    address = ", ".join(p for p in address_parts if p).strip()
+
+    city    = addr.get("city","") or ""
+    amount  = float(s_order.get("total_price", 0) or 0)
+
+    # Get product names
+    items   = s_order.get("line_items", [])
+    product = ", ".join(i.get("name","") for i in items[:2]) or "Shopify Order"
+
+    return {
+        "order_id":       existing_id,
+        "shopify_id":     str(s_order.get("id","")),
+        "shopify_number": s_order.get("name",""),   # e.g. #1001
+        "name":           name,
+        "phone":          phone,
+        "address":        address,
+        "city":           city,
+        "product":        product,
+        "amount":         amount,
+        "courier":        "",
+        "notes":          f"Shopify Order {s_order.get('name','')} | {s_order.get('email','')}",
+        "status":         "pending",
+        "source":         "shopify",
+        "created_at":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "shopify_created": s_order.get("created_at",""),
+        "reminders_sent": [],
+        "rto_reason":     "",
+        "rto_date":       "",
+    }
+
+def sync_shopify_orders():
+    """Poll Shopify for new orders and import them"""
+    cfg = load_shopify_config()
+    if not cfg.get("enabled") or not cfg.get("token") or not cfg.get("shop"):
+        return {"synced": 0, "message": "Shopify not configured"}
+
+    try:
+        headers = {
+            "X-Shopify-Access-Token": cfg["token"],
+            "Content-Type": "application/json",
+        }
+        # Get recent orders (last 7 days, unfulfilled + pending)
+        url = f"https://{cfg['shop']}/admin/api/2024-01/orders.json?status=any&limit=50"
+        resp = req_lib.get(url, headers=headers, timeout=15)
+
+        if resp.status_code != 200:
+            return {"synced": 0, "error": f"Shopify API error: {resp.status_code}"}
+
+        shopify_orders = resp.json().get("orders", [])
+        existing       = load_orders()
+        synced_ids     = set(cfg.get("synced_ids", []))
+
+        # ── IDs currently in Shopify ───────────────────────────────────────
+        shopify_ids_live = {str(o.get("id","")) for o in shopify_orders}
+
+        # ── DELETE: Remove orders that were deleted from Shopify ───────────
+        deleted_count = 0
+        new_existing = []
+        for o in existing:
+            sid = o.get("shopify_id", "")
+            if sid and sid not in shopify_ids_live:
+                # This order was deleted from Shopify — remove from PakDelivery too
+                synced_ids.discard(sid)
+                deleted_count += 1
+            else:
+                new_existing.append(o)
+
+        if deleted_count > 0:
+            existing = new_existing
+            save_orders(existing)
+
+        # ── ADD: Import new orders ─────────────────────────────────────────
+        existing_shopify_ids = {o.get("shopify_id","") for o in existing}
+
+        new_count = 0
+        for s_order in shopify_orders:
+            sid = str(s_order.get("id",""))
+            if sid in existing_shopify_ids or sid in synced_ids:
+                continue  # Already imported
+
+            new_id    = next_order_id(existing)
+            new_order = shopify_to_order(s_order, new_id)
+            risk      = analyze_order(new_order)
+            new_order["_risk_level"] = risk["level"]
+            new_order["_risk_score"] = risk["score"]
+
+            existing.append(new_order)
+            synced_ids.add(sid)
+            new_count += 1
+
+        if new_count > 0:
+            save_orders(existing)
+
+        cfg["synced_ids"]  = list(synced_ids)
+        cfg["last_synced"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_shopify_config(cfg)
+
+        return {"synced": new_count, "deleted": deleted_count, "total_shopify": len(shopify_orders), "last_synced": cfg["last_synced"]}
+
+    except Exception as e:
+        return {"synced": 0, "error": str(e)}
+
+# ── Background polling every 5 min ────────────────────────────────────────────
+def start_shopify_polling():
+    import time
+    def poll():
+        while True:
+            try:
+                cfg = load_shopify_config()
+                if cfg.get("enabled"):
+                    sync_shopify_orders()
+            except: pass
+            time.sleep(int(os.getenv("POLL_INTERVAL", "180")))  # default 3 min
+    t = threading.Thread(target=poll, daemon=True)
+    t.start()
+
+start_shopify_polling()
+
+# ── Shopify API Endpoints ──────────────────────────────────────────────────────
+class ShopifyConfig(BaseModel):
+    shop:  str
+    token: str
+
+@app.get("/shopify/config")
+def get_shopify_config():
+    cfg = load_shopify_config()
+    # Don't expose full token
+    safe = {**cfg, "token": cfg["token"][:8]+"..." if cfg.get("token") else ""}
+    return safe
+
+@app.post("/shopify/connect")
+def connect_shopify(data: ShopifyConfig):
+    shop  = data.shop.replace("https://","").replace("http://","").strip().rstrip("/")
+    if not shop.endswith(".myshopify.com"):
+        shop = shop + ".myshopify.com"
+
+    # Test connection
+    try:
+        resp = req_lib.get(
+            f"https://{shop}/admin/api/2024-01/shop.json",
+            headers={"X-Shopify-Access-Token": data.token},
+            timeout=10
+        )
+        if resp.status_code != 200:
+            raise HTTPException(400, f"Token invalid ya shop galat hai — {resp.status_code}")
+        shop_info = resp.json().get("shop", {})
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(400, f"Connection failed: {str(e)}")
+
+    cfg = load_shopify_config()
+    cfg.update({
+        "enabled":    True,
+        "shop":       shop,
+        "token":      data.token,
+        "shop_name":  shop_info.get("name",""),
+        "shop_email": shop_info.get("email",""),
+        "synced_ids": cfg.get("synced_ids",[]),
+    })
+    save_shopify_config(cfg)
+    return {"connected": True, "shop_name": shop_info.get("name",""), "shop": shop}
+
+@app.post("/shopify/sync")
+def manual_sync():
+    result = sync_shopify_orders()
+    return result
+
+@app.get("/shopify/status")
+def shopify_status():
+    cfg = load_shopify_config()
+    return {
+        "enabled":     cfg.get("enabled", False),
+        "shop":        cfg.get("shop",""),
+        "shop_name":   cfg.get("shop_name",""),
+        "last_synced": cfg.get("last_synced",""),
+        "synced_count":len(cfg.get("synced_ids",[])),
+    }
+
+@app.post("/shopify/reset-sync")
+def reset_sync():
+    cfg = load_shopify_config()
+    cfg["synced_ids"] = []
+    save_shopify_config(cfg)
+    return {"reset": True, "message": "Sync history clear — ab dobara sab orders import honge"}
+
+@app.post("/shopify/disconnect")
+def disconnect_shopify():
+    cfg = load_shopify_config()
+    cfg["enabled"] = False
+    cfg["token"]   = ""
+    save_shopify_config(cfg)
+    return {"disconnected": True}

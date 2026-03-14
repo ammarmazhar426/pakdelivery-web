@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Plus, RefreshCw, ChevronDown, Upload, Download, Calendar, X, Search } from 'lucide-react'
 import toast from 'react-hot-toast'
-import { getOrders, getStats, deleteOrder, updateOrder, exportCSV, exportJSON, importFile } from '../api'
+import { getOrders, getStats, shopifySync, deleteOrder, updateOrder, exportCSV, exportJSON, importFile } from '../api'
 import AddOrderModal from '../components/AddOrderModal'
 import OrderDetail   from '../components/OrderDetail'
 
@@ -142,6 +142,7 @@ export default function Dashboard() {
   const [searchOpen,   setSearchOpen]   = useState(false)
   const importRef  = useRef()
   const dateDDRef  = useRef()
+  const [syncing, setSyncing] = useState(false)
 
   const fetchAll = useCallback(async () => {
     setLoading(true)
@@ -152,6 +153,29 @@ export default function Dashboard() {
     } catch { toast.error('Server se connect nahi hua') }
     finally { setLoading(false) }
   }, [])
+
+  const handleRefresh = async () => {
+    setSyncing(true)
+    try {
+      // First sync Shopify orders, then refresh dashboard
+      const syncRes = await shopifySync()
+      await fetchAll()
+      const synced  = syncRes?.data?.synced  || 0
+      const deleted = syncRes?.data?.deleted || 0
+      if (synced > 0 && deleted > 0) {
+        toast.success(`🛒 ${synced} naye aaye, 🗑️ ${deleted} delete hue`)
+      } else if (synced > 0) {
+        toast.success(`🛒 ${synced} naye Shopify orders aaye!`)
+      } else if (deleted > 0) {
+        toast.success(`🗑️ ${deleted} orders Shopify se delete ho chuke the — hataye gaye`)
+      } else {
+        toast.success('Dashboard refresh ho gaya ✅')
+      }
+    } catch {
+      await fetchAll()
+      toast.success('Dashboard refresh ho gaya ✅')
+    } finally { setSyncing(false) }
+  }
 
   useEffect(() => { fetchAll() }, [fetchAll])
 
@@ -184,6 +208,25 @@ export default function Dashboard() {
   }
 
   const onDelete = async (order) => {
+    const isShopify = order.source === 'shopify'
+
+    if (isShopify) {
+      const choice = window.confirm(
+        `🛒 Yeh Shopify order hai (${order.shopify_number || order.order_id})\n\nOK = Delete karo\nCancel = Wapis jao`
+      )
+      if (!choice) return
+
+      const alsoShopify = window.confirm(
+        `Shopify store se bhi delete karein?\n\nOK = Haan, dono se hatao\nCancel = Sirf PakDelivery se hatao`
+      )
+      try {
+        await deleteOrder(order.order_id, alsoShopify)
+        toast.success(alsoShopify ? '🗑️ PakDelivery + Shopify dono se delete ho gaya' : '🗑️ PakDelivery se delete ho gaya')
+        fetchAll()
+      } catch { toast.error('Delete nahi hua') }
+      return
+    }
+
     if (!window.confirm(`${order.order_id} delete karein?`)) return
     try {
       await deleteOrder(order.order_id)
@@ -213,7 +256,7 @@ export default function Dashboard() {
       {/* ── Title + Actions ── */}
       <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:16, flexWrap:'wrap', gap:10 }}>
         <div>
-          <h1 style={{ fontSize:22, fontWeight:700, color:'var(--text-white)' }}>Orders Dashboard</h1>
+          <h1 style={{ fontSize:22, fontWeight:700, color:'var(--text-white)' }}>Orders</h1>
           <p style={{ fontSize:11, color:'var(--text-dim)', marginTop:2 }}>Manage & track your COD orders</p>
         </div>
 
@@ -225,8 +268,9 @@ export default function Dashboard() {
             <Search size={13}/>
             {searchQuery && <span style={{ background:'white', color:'#00C566', borderRadius:20, fontSize:9, fontWeight:800, padding:'1px 5px' }}>{filtered.length}</span>}
           </button>
-          <button className="btn-ios" onClick={fetchAll} style={{ display:'flex', alignItems:'center', gap:5 }}>
-            <RefreshCw size={13}/> <span className="hide-sm">Refresh</span>
+          <button className="btn-ios" onClick={handleRefresh} disabled={syncing} style={{ display:'flex', alignItems:'center', gap:5 }}>
+            <RefreshCw size={13} style={{ animation: syncing ? 'spin 1s linear infinite' : 'none' }}/>
+            <span className="hide-sm">{syncing ? 'Syncing...' : 'Refresh'}</span>
           </button>
 
           {/* Date filter */}
