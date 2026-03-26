@@ -3,7 +3,7 @@ PakDelivery Pro — FastAPI Backend
 Run: uvicorn main:app --reload --port 8000
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from dotenv import load_dotenv
 import os
 load_dotenv()  # Load .env file
@@ -14,8 +14,14 @@ from pathlib import Path
 from datetime import datetime, date
 import json, re, threading, requests as req_lib
 
+# ── Database + Auth ───────────────────────────────────────────────────────────
+from database import init_db, get_db, User, Store, Order as DBOrder, Blacklist as DBBlacklist
+from auth import get_current_user
+from routes_auth import router as auth_router
+from sqlalchemy.orm import Session
+
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="PakDelivery Pro API", version="2.0")
+app = FastAPI(title="PakDelivery Pro API", version="3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,21 +30,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Data ──────────────────────────────────────────────────────────────────────
-DATA_FILE = Path("orders.json")
+# ── Init DB + Auth Routes ─────────────────────────────────────────────────────
+@app.on_event("startup")
+def startup():
+    init_db()
 
-def load_orders():
+app.include_router(auth_router)
+
+# ── Data (Store-specific — privacy isolation) ─────────────────────────────────
+DATA_DIR = Path("store_data")
+DATA_DIR.mkdir(exist_ok=True)
+
+def _orders_file(store_id: str) -> Path:
+    return DATA_DIR / f"orders_{store_id}.json"
+
+def _blacklist_file(store_id: str) -> Path:
+    return DATA_DIR / f"blacklist_{store_id}.json"
+
+def _shopify_file(store_id: str) -> Path:
+    return DATA_DIR / f"shopify_{store_id}.json"
+
+def _pnl_file(store_id: str) -> Path:
+    return DATA_DIR / f"pnl_{store_id}.json"
+
+def load_orders(store_id: str = "default"):
     try:
-        if DATA_FILE.exists():
-            return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    except:
-        pass
+        f = _orders_file(store_id)
+        if f.exists():
+            return json.loads(f.read_text(encoding="utf-8"))
+    except: pass
     return []
 
-def save_orders(orders):
-    DATA_FILE.write_text(
-        json.dumps(orders, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+def save_orders(orders, store_id: str = "default"):
+    _orders_file(store_id).write_text(
+        json.dumps(orders, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 # ── WhatsApp ──────────────────────────────────────────────────────────────────
@@ -66,17 +91,18 @@ def send_whatsapp(phone: str, message: str) -> dict:
         return {"sent": False, "error": str(e)}
 
 # ── Blacklist ─────────────────────────────────────────────────────────────────
-BLACKLIST_FILE = Path("blacklist.json")
-
-def load_blacklist():
+def load_blacklist(store_id: str = "default"):
     try:
-        if BLACKLIST_FILE.exists():
-            return json.loads(BLACKLIST_FILE.read_text(encoding="utf-8"))
+        f = _blacklist_file(store_id)
+        if f.exists():
+            return json.loads(f.read_text(encoding="utf-8"))
     except: pass
     return []
 
-def save_blacklist(bl):
-    BLACKLIST_FILE.write_text(json.dumps(bl, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_blacklist(bl, store_id: str = "default"):
+    _blacklist_file(store_id).write_text(
+        json.dumps(bl, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 def clean_phone(p: str) -> str:
     p = re.sub(r"\D","", str(p))
@@ -463,20 +489,36 @@ def next_order_id(orders):
 # ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Helper: Get active store_id ──────────────────────────────────────────────
+def get_store_id(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> str:
+    """Get store_id from query param or first store of user"""
+    from database import Store as DBStore
+    if store_id:
+        # Verify store belongs to this user
+        store = db.query(DBStore).filter(DBStore.id == store_id, DBStore.owner_id == current_user.id).first()
+        if store:
+            return store_id
+    # Fallback to first store
+    store = db.query(DBStore).filter(DBStore.owner_id == current_user.id).first()
+    if not store:
+        raise HTTPException(404, "Koi store nahi mila — pehle store banayein")
+    return store.id
+
 # ── Orders CRUD ───────────────────────────────────────────────────────────────
 @app.get("/orders")
-def get_orders(status: Optional[str] = None):
-    orders = load_orders()
+def get_orders(status: Optional[str] = None, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    orders = load_orders(sid)
     if status and status != "all":
         orders = [o for o in orders if o.get("status") == status]
-    # Add risk analysis to each
     for o in orders:
         o["_risk"] = analyze_order(o)
     return {"orders": orders, "total": len(orders)}
 
 @app.post("/orders")
-def create_order(data: OrderCreate):
-    orders = load_orders()
+def create_order(data: OrderCreate, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    orders = load_orders(sid)
     order = {
         "order_id":       next_order_id(orders),
         "name":           data.name,
@@ -494,12 +536,13 @@ def create_order(data: OrderCreate):
         "rto_date":       "",
     }
     orders.append(order)
-    save_orders(orders)
+    save_orders(orders, sid)
     return {"order": order, "risk": analyze_order(order)}
 
 @app.get("/orders/{order_id}")
-def get_order(order_id: str):
-    orders = load_orders()
+def get_order(order_id: str, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    orders = load_orders(sid)
     for o in orders:
         if o["order_id"].upper() == order_id.upper():
             o["_risk"] = analyze_order(o)
@@ -507,14 +550,15 @@ def get_order(order_id: str):
     raise HTTPException(404, "Order not found")
 
 @app.patch("/orders/{order_id}")
-def update_order(order_id: str, data: OrderUpdate):
-    orders = load_orders()
+def update_order(order_id: str, data: OrderUpdate, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    orders = load_orders(sid)
     for o in orders:
         if o["order_id"].upper() == order_id.upper():
             if data.status  is not None: o["status"]  = data.status
             if data.notes   is not None: o["notes"]   = data.notes
             if data.courier is not None: o["courier"] = data.courier
-            save_orders(orders)
+            save_orders(orders, sid)
 
             # Auto WhatsApp on status change
             new_status = data.status
@@ -523,16 +567,16 @@ def update_order(order_id: str, data: OrderUpdate):
                 risk = analyze_order(o)
                 if stage_key and stage_key not in o.get("reminders_sent",[]) and risk["rec"] != "REJECT":
                     msg = build_message(stage_key, o)
-                    def _send(order=o, sk=stage_key, m=msg):
+                    def _send(order=o, sk=stage_key, m=msg, sid=sid):
                         result = send_whatsapp(order["phone"], m)
                         if result["sent"]:
-                            all_orders = load_orders()
+                            all_orders = load_orders(sid)
                             for ord_ in all_orders:
                                 if ord_["order_id"] == order["order_id"]:
                                     ord_.setdefault("reminders_sent",[])
                                     if sk not in ord_["reminders_sent"]:
                                         ord_["reminders_sent"].append(sk)
-                            save_orders(all_orders)
+                            save_orders(all_orders, sid)
                     threading.Thread(target=_send, daemon=True).start()
 
             o["_risk"] = analyze_order(o)
@@ -540,8 +584,9 @@ def update_order(order_id: str, data: OrderUpdate):
     raise HTTPException(404, "Order not found")
 
 @app.delete("/orders/{order_id}")
-def delete_order(order_id: str, delete_from_shopify: bool = False):
-    orders = load_orders()
+def delete_order(order_id: str, delete_from_shopify: bool = False, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    orders = load_orders(sid)
     # Find order first
     target = next((o for o in orders if o["order_id"].upper() == order_id.upper()), None)
     if not target:
@@ -570,7 +615,7 @@ def delete_order(order_id: str, delete_from_shopify: bool = False):
                 pass
 
     new_orders = [o for o in orders if o["order_id"].upper() != order_id.upper()]
-    save_orders(new_orders)
+    save_orders(new_orders, sid)
     return {"deleted": order_id, "shopify_deleted": shopify_deleted, "was_shopify_order": bool(target.get("shopify_id"))}
 
 # ── Risk Check ────────────────────────────────────────────────────────────────
@@ -591,8 +636,9 @@ def test_whatsapp():
 
 # ── WhatsApp Manual Send ──────────────────────────────────────────────────────
 @app.post("/whatsapp/send")
-def manual_send(data: WhatsAppSend):
-    orders = load_orders()
+def manual_send(data: WhatsAppSend, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    orders = load_orders(sid)
     for o in orders:
         if o["order_id"].upper() == data.order_id.upper():
             msg = build_message(data.stage_key, o)
@@ -601,14 +647,15 @@ def manual_send(data: WhatsAppSend):
                 o.setdefault("reminders_sent", [])
                 if data.stage_key not in o["reminders_sent"]:
                     o["reminders_sent"].append(data.stage_key)
-                save_orders(orders)
+                save_orders(orders, sid)
             return {"sent": result["sent"], "stage": data.stage_key, "error": result.get("error")}
     raise HTTPException(404, "Order not found")
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
 @app.get("/stats")
-def get_stats():
-    orders = load_orders()
+def get_stats(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    orders = load_orders(sid)
     total     = len(orders)
     delivered = sum(1 for o in orders if o.get("status") == "delivered")
     risks     = [analyze_order(o) for o in orders]
@@ -636,12 +683,14 @@ class BlacklistAdd(BaseModel):
     reason: Optional[str] = ""
 
 @app.get("/blacklist")
-def get_blacklist():
-    return {"blacklist": load_blacklist()}
+def get_blacklist(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    return {"blacklist": load_blacklist(sid)}
 
 @app.post("/blacklist")
-def add_blacklist(data: BlacklistAdd):
-    bl    = load_blacklist()
+def add_blacklist(data: BlacklistAdd, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid   = get_store_id(store_id, current_user, db)
+    bl    = load_blacklist(sid)
     phone = clean_phone(data.phone)
     existing = next((b for b in bl if clean_phone(b["phone"]) == phone), None)
     if existing:
@@ -655,23 +704,25 @@ def add_blacklist(data: BlacklistAdd):
             "added_on":      datetime.now().strftime("%Y-%m-%d %H:%M"),
             "times_blocked": 1,
         })
-    save_blacklist(bl)
+    save_blacklist(bl, sid)
     return {"added": True, "total": len(bl)}
 
 @app.delete("/blacklist/{phone}")
-def remove_blacklist(phone: str):
-    bl  = load_blacklist()
+def remove_blacklist(phone: str, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    bl  = load_blacklist(sid)
     ph  = clean_phone(phone)
-    new = [b for b in bl if clean_phone(b["phone"]) != ph]
-    if len(new) == len(bl):
+    new_bl = [b for b in bl if clean_phone(b["phone"]) != ph]
+    if len(new_bl) == len(bl):
         raise HTTPException(404, "Not in blacklist")
-    save_blacklist(new)
+    save_blacklist(new_bl, sid)
     return {"removed": True}
 
 # ── Risk Analytics (area & product heatmap) ───────────────────────────────────
 @app.get("/risk/analytics")
-def risk_analytics():
-    orders = load_orders()
+def risk_analytics(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    orders = load_orders(sid)
 
     # City RTO rates
     city_stats = {}
@@ -850,17 +901,18 @@ def get_notifications():
     return {"notifications": notifs, "count": len(notifs)}
 
 # ── P&L Records ───────────────────────────────────────────────────────────────
-PNL_FILE = Path("pnl_records.json")
-
-def load_pnl():
+def load_pnl(store_id: str = "default"):
     try:
-        if PNL_FILE.exists():
-            return json.loads(PNL_FILE.read_text(encoding="utf-8"))
+        f = _pnl_file(store_id)
+        if f.exists():
+            return json.loads(f.read_text(encoding="utf-8"))
     except: pass
     return []
 
-def save_pnl(records):
-    PNL_FILE.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_pnl(records, store_id: str = "default"):
+    _pnl_file(store_id).write_text(
+        json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 class PNLRecord(BaseModel):
     date:             str
@@ -927,32 +979,34 @@ def create_pnl(data: PNLRecord):
         "created_at":      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
     records.append(record)
-    save_pnl(records)
+    save_pnl(records, sid)
     return record
 
 @app.delete("/pnl/{record_id}")
-def delete_pnl(record_id: str):
-    records = load_pnl()
-    new = [r for r in records if r["id"] != record_id]
-    if len(new) == len(records):
+def delete_pnl(record_id: str, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    records = load_pnl(sid)
+    new_rec = [r for r in records if r["id"] != record_id]
+    if len(new_rec) == len(records):
         raise HTTPException(404, "Record not found")
-    save_pnl(new)
+    save_pnl(new_rec, sid)
     return {"deleted": record_id}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SHOPIFY INTEGRATION
 # ══════════════════════════════════════════════════════════════════════════════
-SHOPIFY_CONFIG_FILE = Path("shopify_config.json")
-
-def load_shopify_config():
+def load_shopify_config(store_id: str = "default"):
     try:
-        if SHOPIFY_CONFIG_FILE.exists():
-            return json.loads(SHOPIFY_CONFIG_FILE.read_text(encoding="utf-8"))
+        f = _shopify_file(store_id)
+        if f.exists():
+            return json.loads(f.read_text(encoding="utf-8"))
     except: pass
     return {"enabled": False, "shop": "", "token": "", "last_synced": "", "synced_ids": []}
 
-def save_shopify_config(cfg):
-    SHOPIFY_CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_shopify_config(cfg, store_id: str = "default"):
+    _shopify_file(store_id).write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 def shopify_to_order(s_order: dict, existing_id: str) -> dict:
     """Convert Shopify order format to PakDelivery format"""
@@ -1006,9 +1060,9 @@ def shopify_to_order(s_order: dict, existing_id: str) -> dict:
         "rto_date":       "",
     }
 
-def sync_shopify_orders():
+def sync_shopify_orders(store_id: str = "default"):
     """Poll Shopify for new orders and import them"""
-    cfg = load_shopify_config()
+    cfg = load_shopify_config(store_id)
     if not cfg.get("enabled") or not cfg.get("token") or not cfg.get("shop"):
         return {"synced": 0, "message": "Shopify not configured"}
 
@@ -1025,7 +1079,7 @@ def sync_shopify_orders():
             return {"synced": 0, "error": f"Shopify API error: {resp.status_code}"}
 
         shopify_orders = resp.json().get("orders", [])
-        existing       = load_orders()
+        existing       = load_orders(store_id)
         synced_ids     = set(cfg.get("synced_ids", []))
 
         # ── IDs currently in Shopify ───────────────────────────────────────
@@ -1045,7 +1099,7 @@ def sync_shopify_orders():
 
         if deleted_count > 0:
             existing = new_existing
-            save_orders(existing)
+            save_orders(existing, store_id)
 
         # ── ADD: Import new orders ─────────────────────────────────────────
         existing_shopify_ids = {o.get("shopify_id","") for o in existing}
@@ -1067,11 +1121,11 @@ def sync_shopify_orders():
             new_count += 1
 
         if new_count > 0:
-            save_orders(existing)
+            save_orders(existing, store_id)
 
         cfg["synced_ids"]  = list(synced_ids)
         cfg["last_synced"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        save_shopify_config(cfg)
+        save_shopify_config(cfg, store_id)
 
         return {"synced": new_count, "deleted": deleted_count, "total_shopify": len(shopify_orders), "last_synced": cfg["last_synced"]}
 
@@ -1084,11 +1138,19 @@ def start_shopify_polling():
     def poll():
         while True:
             try:
-                cfg = load_shopify_config()
-                if cfg.get("enabled"):
-                    sync_shopify_orders()
+                # Poll all store_data shopify configs
+                store_dir = Path("store_data")
+                if store_dir.exists():
+                    for f in store_dir.glob("shopify_*.json"):
+                        # Extract store_id from filename: shopify_{store_id}.json
+                        store_id = f.stem.replace("shopify_", "")
+                        try:
+                            cfg = load_shopify_config(store_id)
+                            if cfg.get("enabled"):
+                                sync_shopify_orders(store_id)
+                        except: pass
             except: pass
-            time.sleep(int(os.getenv("POLL_INTERVAL", "180")))  # default 3 min
+            time.sleep(int(os.getenv("POLL_INTERVAL", "180")))
     t = threading.Thread(target=poll, daemon=True)
     t.start()
 
@@ -1100,14 +1162,16 @@ class ShopifyConfig(BaseModel):
     token: str
 
 @app.get("/shopify/config")
-def get_shopify_config():
-    cfg = load_shopify_config()
+def get_shopify_config(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    cfg = load_shopify_config(sid)
     # Don't expose full token
     safe = {**cfg, "token": cfg["token"][:8]+"..." if cfg.get("token") else ""}
     return safe
 
 @app.post("/shopify/connect")
-def connect_shopify(data: ShopifyConfig):
+def connect_shopify(data: ShopifyConfig, store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
     shop  = data.shop.replace("https://","").replace("http://","").strip().rstrip("/")
     if not shop.endswith(".myshopify.com"):
         shop = shop + ".myshopify.com"
@@ -1126,7 +1190,7 @@ def connect_shopify(data: ShopifyConfig):
     except Exception as e:
         raise HTTPException(400, f"Connection failed: {str(e)}")
 
-    cfg = load_shopify_config()
+    cfg = load_shopify_config(sid)
     cfg.update({
         "enabled":    True,
         "shop":       shop,
@@ -1135,17 +1199,19 @@ def connect_shopify(data: ShopifyConfig):
         "shop_email": shop_info.get("email",""),
         "synced_ids": cfg.get("synced_ids",[]),
     })
-    save_shopify_config(cfg)
+    save_shopify_config(cfg, sid)
     return {"connected": True, "shop_name": shop_info.get("name",""), "shop": shop}
 
 @app.post("/shopify/sync")
-def manual_sync():
-    result = sync_shopify_orders()
+def manual_sync(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    result = sync_shopify_orders(sid)
     return result
 
 @app.get("/shopify/status")
-def shopify_status():
-    cfg = load_shopify_config()
+def shopify_status(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    cfg = load_shopify_config(sid)
     return {
         "enabled":     cfg.get("enabled", False),
         "shop":        cfg.get("shop",""),
@@ -1155,16 +1221,18 @@ def shopify_status():
     }
 
 @app.post("/shopify/reset-sync")
-def reset_sync():
-    cfg = load_shopify_config()
+def reset_sync(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    cfg = load_shopify_config(sid)
     cfg["synced_ids"] = []
-    save_shopify_config(cfg)
+    save_shopify_config(cfg, sid)
     return {"reset": True, "message": "Sync history clear — ab dobara sab orders import honge"}
 
 @app.post("/shopify/disconnect")
-def disconnect_shopify():
-    cfg = load_shopify_config()
+def disconnect_shopify(store_id: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sid = get_store_id(store_id, current_user, db)
+    cfg = load_shopify_config(sid)
     cfg["enabled"] = False
     cfg["token"]   = ""
-    save_shopify_config(cfg)
+    save_shopify_config(cfg, sid)
     return {"disconnected": True}

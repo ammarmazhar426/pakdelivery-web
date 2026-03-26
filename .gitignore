@@ -10,6 +10,9 @@ backend/orders.json
 backend/blacklist.json
 backend/pnl_records.json
 backend/shopify_config.json
+backend/otp_store.json
+backend/store_data/
+backend/pakdelivery.db
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
